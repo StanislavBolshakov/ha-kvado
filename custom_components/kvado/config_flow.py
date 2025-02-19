@@ -30,12 +30,15 @@ ACCOUNT_SELECTION_SCHEMA = vol.Schema(
 
 
 class CannotConnect(HomeAssistantError):
+    """Error to indicate we cannot connect."""
 
 
 class InvalidAuth(HomeAssistantError):
+    """Error to indicate invalid authentication."""
 
 
 class KvadoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+    """Handle a config flow for Kvado."""
 
     VERSION = 1
 
@@ -92,7 +95,7 @@ class KvadoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except InvalidAuth:
                 _LOGGER.error("Invalid authentication credentials.")
                 errors["base"] = "invalid_auth"
-            except Exception as e: 
+            except Exception as e:
                 _LOGGER.exception(f"Unexpected exception: {e}")
                 errors["base"] = "unknown"
 
