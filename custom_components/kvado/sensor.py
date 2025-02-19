@@ -13,7 +13,7 @@ from .api import KvadoApiClient
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
-SCAN_INTERVAL = timedelta(minutes=5)
+SCAN_INTERVAL = timedelta(minutes=15)
 
 
 async def async_setup_entry(
