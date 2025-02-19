@@ -8,3 +8,8 @@
 1. В HACS добавить [пользовательский репозиторий](https://hacs.xyz/docs/faq/custom_repositories/)
 2. Пройти процедуру аутентификации используя учетные данные [личного кабинета КВАДО](https://cabinet.kvado.ru/login)
 3. Выберите необходимые учетные записи. Вложенные в них счетчики будут добавлены автоматически
+
+logger:
+  default: info
+  logs:
+    custom_components.kvado: debug
