@@ -1,7 +1,7 @@
 {
   "domain": "kvado",
   "name": "KVADO Integration",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "documentation": "https://github.com/StanislavBolshakov/ha-kvado",
   "requirements": ["aiohttp"],
   "codeowners": ["@StanislavBolshakov"],
