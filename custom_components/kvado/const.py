@@ -1,3 +1,3 @@
-"""Constants for EIRC Integration."""
+"""Constants for KVADO Integration."""
 
 DOMAIN = "kvado"

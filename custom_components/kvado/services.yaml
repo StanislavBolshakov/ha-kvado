@@ -1,0 +1,25 @@
+send_meter_readings:
+  name: Send Meter Readings
+  description: Send meter readings to Kvado
+  fields:
+    entity_id:
+      name: Entity ID
+      description: The entity ID of a Kvado account sensor
+      required: true
+      example: "sensor.kvado_account"
+      selector:
+        entity:
+          filter:
+            domain: sensor
+            integration: kvado
+    meter_readings:
+      name: List of meter readings to send
+      description: List of meter readings with meter sensor entity ID and new value (float)
+      required: true
+      example: |
+        - entity_id: "sensor.cold_water_7426227"
+          newValue: 0.0
+        - entity_id: "sensor.cold_water_7426229"
+          newValue: 12.5
+      selector:
+        object:

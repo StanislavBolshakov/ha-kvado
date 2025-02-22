@@ -1,20 +1,45 @@
-import logging
+"""Kvado Account and Meter integration."""
+
 from datetime import datetime, timedelta
+import logging
+
+import voluptuous as vol
+
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import HomeAssistantError
+import homeassistant.helpers.device_registry as dr
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.device_registry import (
-    DeviceInfo,
-    async_get as async_get_device_registry,
-)
-from homeassistant.helpers.entity_registry import async_get as async_get_entity_registry
+import homeassistant.helpers.entity_registry as er
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+
 from .api import KvadoApiClient
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
-SCAN_INTERVAL = timedelta(minutes=15)
+SCAN_INTERVAL = timedelta(minutes=5)
+
+SEND_METER_READINGS_SCHEMA = vol.Schema(
+    {
+        vol.Required("entity_id"): str,
+        vol.Required("meter_readings"): vol.All(
+            [
+                vol.Schema(
+                    {
+                        vol.Required("entity_id"): str,
+                        vol.Required(
+                            "newValue", msg="newValue must be a float"
+                        ): vol.Coerce(float),
+                    }
+                )
+            ],
+            vol.Length(min=1),
+        ),
+        vol.Optional("confirm", default=False): bool,
+    }
+)
 
 
 async def async_setup_entry(
@@ -22,7 +47,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Kvado sensors from a config entry."""
+    """Configure Kvado integration sensors and services."""
     api_client = KvadoApiClient(
         hass=hass,
         username=entry.data["username"],
@@ -38,6 +63,7 @@ async def async_setup_entry(
     selected_accounts = entry.data.get("selected_accounts", [])
     accounts = await api_client.get_accounts()
     if not accounts or "accounts" not in accounts:
+        _LOGGER.error("Failed to fetch accounts from Kvado API")
         return
 
     await cleanup_unselected_accounts(
@@ -47,7 +73,11 @@ async def async_setup_entry(
     coordinator = KvadoDataUpdateCoordinator(
         hass, api_client, selected_accounts, accounts["accounts"]
     )
-    await coordinator.async_config_entry_first_refresh()
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except UpdateFailed as e:
+        _LOGGER.error("Failed to initialize coordinator: {}".format(e))
+        return
 
     sensors = []
     for account in accounts["accounts"]:
@@ -66,7 +96,95 @@ async def async_setup_entry(
     if sensors:
         async_add_entities(sensors, update_before_add=True)
 
-    hass.data[DOMAIN][entry.entry_id]["selected_accounts"] = selected_accounts
+    async def handle_send_meter_readings(call: ServiceCall) -> None:
+        """Process meter reading submissions via service call."""
+        _LOGGER.debug("Raw service call data: {}".format(call.data))
+
+        try:
+            validated_data = SEND_METER_READINGS_SCHEMA(dict(call.data))
+        except vol.Invalid as e:
+            _LOGGER.error("Service call validation failed: {}".format(e))
+            raise HomeAssistantError("Invalid input: {}".format(e))
+
+        entity_id = validated_data["entity_id"]
+        meter_readings_input = validated_data["meter_readings"]
+        confirm = validated_data["confirm"]
+
+        entity = hass.states.get(entity_id)
+        if (
+            not entity
+            or entity.domain != "sensor"
+            or "Account ID" not in entity.attributes
+        ):
+            _LOGGER.error(
+                "Invalid entity_id {}: must be a valid KvadoSensor".format(entity_id)
+            )
+            raise HomeAssistantError(
+                "Invalid entity_id {}: must be a valid KvadoSensor".format(entity_id)
+            )
+
+        account_id = entity.attributes.get("Account ID")
+        organization_id = entity.attributes.get("Organization ID")
+
+        meter_readings = []
+        for reading in meter_readings_input:
+            meter_entity = hass.states.get(reading["entity_id"])
+            if (
+                not meter_entity
+                or meter_entity.domain != "sensor"
+                or "Meter ID" not in meter_entity.attributes
+            ):
+                _LOGGER.error(
+                    "Invalid meter entity_id {}: must be a valid KvadoMeterSensor".format(
+                        reading["entity_id"]
+                    )
+                )
+                raise HomeAssistantError(
+                    "Invalid meter entity_id {}: must be a valid KvadoMeterSensor".format(
+                        reading["entity_id"]
+                    )
+                )
+            meter_id = meter_entity.attributes.get("Meter ID")
+
+            meter_readings.append(
+                {
+                    "ID": meter_id,
+                    "values": [
+                        {"systemCatalogBetID": 1, "newValue": reading["newValue"]}
+                    ],
+                }
+            )
+
+        result = await api_client.send_meter_readings(
+            account_id=account_id,
+            organization_id=organization_id,
+            meter_readings=meter_readings,
+            confirm=confirm,
+        )
+        if result is None:
+            _LOGGER.error(
+                "Failed to send meter readings for account {}".format(account_id)
+            )
+            raise HomeAssistantError(
+                "Failed to send meter readings. Check Home Assistant logs"
+            )
+        _LOGGER.info(
+            "Successfully sent meter readings for account {}: {}".format(
+                account_id, result
+            )
+        )
+
+    try:
+        hass.services.async_register(
+            DOMAIN,
+            "send_meter_readings",
+            handle_send_meter_readings,
+            schema=SEND_METER_READINGS_SCHEMA,
+        )
+        _LOGGER.debug("Successfully registered kvado.send_meter_readings service")
+    except Exception as e:
+        _LOGGER.error("Failed to register send_meter_readings service: {}".format(e))
+        raise
 
 
 async def cleanup_unselected_accounts(
@@ -75,29 +193,34 @@ async def cleanup_unselected_accounts(
     selected_accounts: list,
     all_accounts: list,
 ) -> None:
-    """Remove entities and devices for unselected accounts."""
-    device_registry = async_get_device_registry(hass)
-    entity_registry = async_get_entity_registry(hass)
+    """Clean up entities and devices for deselected accounts."""
+    device_registry = dr.async_get(hass)
+    entity_registry = er.async_get(hass)
 
     current_selected = set(selected_accounts)
-    all_account_ids = {str(account["ID"]) for account in all_accounts}
-    unselected_accounts = all_account_ids - current_selected
+    unselected_accounts = {
+        str(account["ID"]) for account in all_accounts
+    } - current_selected
 
-    for account in all_accounts:
-        account_id = str(account["ID"])
-        if account_id in unselected_accounts:
-            device_identifier = (DOMAIN, f"kvado_account_{account_id}")
-            device = device_registry.async_get_device(identifiers={device_identifier})
-            if device:
-                device_registry.async_remove_device(device.id)
+    for account_id in unselected_accounts:
+        device_identifier = (DOMAIN, f"kvado_account_{account_id}")
+        device = device_registry.async_get_device(identifiers={device_identifier})
+        if device:
+            device_registry.async_remove_device(device.id)
 
-            organization_id = str(account["organizationID"])
-            for entity in entity_registry.entities.values():
-                if entity.config_entry_id == entry.entry_id and (
-                    entity.unique_id.startswith(f"kvado_{organization_id}_{account_id}")
-                    or entity.unique_id.startswith(f"kvado_meter_{account_id}_")
-                ):
-                    entity_registry.async_remove(entity.entity_id)
+        for account in all_accounts:
+            if str(account["ID"]) == account_id:
+                organization_id = str(account["organizationID"])
+                break
+        else:
+            continue
+
+        for entity in entity_registry.entities.values():
+            if entity.config_entry_id == entry.entry_id and (
+                entity.unique_id.startswith(f"kvado_{organization_id}_{account_id}")
+                or entity.unique_id.startswith(f"kvado_meter_{account_id}_")
+            ):
+                entity_registry.async_remove(entity.entity_id)
 
 
 class KvadoDataUpdateCoordinator(DataUpdateCoordinator):
@@ -116,15 +239,18 @@ class KvadoDataUpdateCoordinator(DataUpdateCoordinator):
         self._api_client = api_client
         self._selected_accounts = [str(acc) for acc in selected_accounts]
         self._accounts = accounts
-        self.data = {}
+        self.data = {"accounts": {}, "meters": {}}
 
     async def _async_update_data(self):
+        """Fetch and update data from Kvado API."""
+        _LOGGER.debug("Coordinator triggered: Starting data update")
         try:
             current_year = datetime.now().year
-            data = {}
+            data = {"accounts": {}, "meters": {}}
             for account in self._accounts:
                 account_id = str(account["ID"])
                 if account_id in self._selected_accounts:
+                    _LOGGER.debug("Fetching receipts for account {}".format(account_id))
                     receipts_data = await self._api_client.get_receipts(
                         year=current_year,
                         account_id=account_id,
@@ -137,10 +263,23 @@ class KvadoDataUpdateCoordinator(DataUpdateCoordinator):
                         if receipts_data and isinstance(receipts_data, dict)
                         else "N/A"
                     )
-                    data[account_id] = total_pay_amount
+                    data["accounts"][account_id] = total_pay_amount
+
+                    _LOGGER.debug("Fetching meters for account {}".format(account_id))
+                    meters = await self._api_client.get_meters(
+                        account_id=account_id,
+                        organization_id=str(account["organizationID"]),
+                    )
+                    if meters and "meters" in meters:
+                        for meter in meters["meters"]:
+                            meter_id = str(meter["ID"])
+                            value = meter.get("values", [{}])[0].get("value", "N/A")
+                            data["meters"][meter_id] = value
+            _LOGGER.debug("Coordinator update completed: {}".format(data))
             return data
         except Exception as e:
-            raise UpdateFailed(f"Error fetching data: {e}")
+            _LOGGER.error("Coordinator update failed: {}".format(e))
+            raise UpdateFailed("Error fetching data: {}".format(e))
 
 
 class KvadoSensor(SensorEntity):
@@ -153,6 +292,25 @@ class KvadoSensor(SensorEntity):
         self._account_number = account["account"]
         self._organization_name = account["organizationName"]
         self._address = account["address"]
+        self._account_data = "N/A"
+
+    async def async_added_to_hass(self) -> None:
+        """Register entity with Home Assistant and set up updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self._coordinator.async_add_listener(self._handle_coordinator_update)
+        )
+        self._handle_coordinator_update()
+
+    def _handle_coordinator_update(self) -> None:
+        """Update sensor state from coordinator data."""
+        self._account_data = self._coordinator.data["accounts"].get(
+            self._account_id, "N/A"
+        )
+        _LOGGER.debug(
+            "Updated account data for {}: {}".format(self.unique_id, self._account_data)
+        )
+        self.async_write_ha_state()
 
     @property
     def name(self):
@@ -164,7 +322,7 @@ class KvadoSensor(SensorEntity):
 
     @property
     def state(self):
-        return self._coordinator.data.get(self._account_id, "N/A")
+        return self._account_data
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -191,16 +349,34 @@ class KvadoMeterSensor(SensorEntity):
 
     def __init__(
         self, coordinator: KvadoDataUpdateCoordinator, account_id: str, meter: dict
-    ):
+    ) -> None:
         self._coordinator = coordinator
         self._account_id = account_id
         self._meter_id = str(meter["ID"])
         self._meter_type = meter["type"]
         self._meter_number = meter["number"]
         self._unit = meter["unit"]
-        self._details = meter["values"][0]["details"] if meter["values"] else "No data"
-        self._state = meter["values"][0]["value"] if meter["values"] else "N/A"
+        self._details = (
+            meter["values"][0]["details"] if meter.get("values") else "No data"
+        )
         self._attr_native_unit_of_measurement = self._unit
+        self._meter_data = "N/A"
+
+    async def async_added_to_hass(self) -> None:
+        """Register entity with Home Assistant and set up updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self._coordinator.async_add_listener(self._handle_coordinator_update)
+        )
+        self._handle_coordinator_update()
+
+    def _handle_coordinator_update(self) -> None:
+        """Update sensor state from coordinator data."""
+        self._meter_data = self._coordinator.data["meters"].get(self._meter_id, "N/A")
+        _LOGGER.debug(
+            "Updated meter data for {}: {}".format(self.unique_id, self._meter_data)
+        )
+        self.async_write_ha_state()
 
     @property
     def name(self):
@@ -212,7 +388,7 @@ class KvadoMeterSensor(SensorEntity):
 
     @property
     def state(self):
-        return self._state
+        return self._meter_data
 
     @property
     def device_info(self) -> DeviceInfo:

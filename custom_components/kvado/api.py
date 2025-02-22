@@ -2,6 +2,7 @@ import aiohttp
 import asyncio
 import logging
 from typing import Dict, Optional, Any, List
+from homeassistant.exceptions import HomeAssistantError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -67,6 +68,16 @@ class KvadoApiClient:
 
                         if response.status == 200:
                             return await response.json()
+                        elif response.status == 400:
+                            try:
+                                error_data = await response.json()
+                                error_message = error_data.get(
+                                    "message", f"API returned status {response.status}"
+                                )
+                            except Exception:
+                                error_message = f"API returned status {response.status} with no readable error message"
+                            _LOGGER.error(f"Request failed with 400: {error_message}")
+                            raise HomeAssistantError(error_message)
                         elif response.status == 401:
                             _LOGGER.warning(
                                 "401 Unauthorized detected, attempting re-authentication..."
@@ -162,3 +173,33 @@ class KvadoApiClient:
             "Organization-Id": organization_id,
         }
         return await self._make_request("GET", METERS_ENDPOINT, headers=headers)
+
+    async def send_meter_readings(
+        self,
+        account_id: str,
+        organization_id: str,
+        meter_readings: List[Dict[str, Any]],
+        confirm: bool = False,
+    ) -> Optional[Dict]:
+        """Send meter readings to the Kvado API."""
+        if not all([self.session_id, account_id, organization_id]):
+            _LOGGER.error("Missing required parameters for sending meter readings")
+            return None
+
+        headers = {
+            **DEFAULT_HEADERS,
+            "Session-Id": self.session_id,
+            "Account-Id": account_id,
+            "Organization-Id": organization_id,
+        }
+        payload = {
+            "confirm": confirm,
+            "meters": meter_readings,
+        }
+
+        return await self._make_request(
+            method="POST",
+            endpoint=METERS_ENDPOINT,
+            headers=headers,
+            payload=payload,
+        )
