@@ -1,3 +1,10 @@
+# [0.2.0](https://github.com/StanislavBolshakov/ha-kvado/compare/v0.1.0...v0.2.0) (2025-02-22)
+
+
+### Features
+
+* **KVADO:** send meter reading service implementation ([630aa84](https://github.com/StanislavBolshakov/ha-kvado/commit/630aa845c48bee7364c584fd2a6031fad1576f04))
+
 # [0.1.0](https://github.com/StanislavBolshakov/ha-kvado/compare/v0.0.2...v0.1.0) (2025-02-20)
 
 
