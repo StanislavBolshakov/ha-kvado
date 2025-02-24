@@ -1,3 +1,10 @@
+## [0.2.1](https://github.com/StanislavBolshakov/ha-kvado/compare/v0.2.0...v0.2.1) (2025-02-22)
+
+
+### Bug Fixes
+
+* **KVADO:** setting update timer to 15 min to avoid extensive API polling ([8ed7f1c](https://github.com/StanislavBolshakov/ha-kvado/commit/8ed7f1c4aef60b76472020d24351e54ff6ea25c5))
+
 # [0.2.0](https://github.com/StanislavBolshakov/ha-kvado/compare/v0.1.0...v0.2.0) (2025-02-22)
 
 
